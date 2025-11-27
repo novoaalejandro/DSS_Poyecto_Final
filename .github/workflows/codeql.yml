@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  # Allow uploading SARIF to GitHub Code Scanning
   security-events: write
 
 jobs:
@@ -84,52 +83,99 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # Ensure Node is available to run Snyk
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
 
-      - name: Install Snyk CLI
-        run: npm install -g snyk
+      - name: Install Snyk CLI and SARIF->HTML tool
+        run: |
+          npm install -g snyk sarif-to-html || true
 
-      - name: Run Snyk Code (Source Code Analysis) and produce SARIF
+      - name: Run Snyk Code (produce JSON + SARIF)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # Run Snyk Code on the CODE directory. Produce both JSON and SARIF outputs.
-          # If there are no results or Snyk exits with non-zero, avoid failing the job so the SARIF upload step can run.
+          # Run Snyk code test on CODE directory. Do not fail the job on non-zero exit to allow further processing.
           snyk code test CODE --json-file-output=snyk-code-analysis.json --sarif-file-output=snyk-code-analysis.sarif || true
 
-      - name: Run Semgrep and produce SARIF
+      - name: Run Semgrep (JSON + SARIF)
         run: |
-          # Run semgrep via docker producing both JSON and SARIF outputs
+          # Use dockerized semgrep to scan CODE and produce JSON + SARIF outputs
           docker run --rm \
             -v "$(pwd)/CODE":/src \
             -v "$(pwd)":/output \
             returntocorp/semgrep \
             semgrep --config=auto --json --output=/output/semgrep-results.json /src || true
-          # Also produce SARIF
           docker run --rm \
             -v "$(pwd)/CODE":/src \
             -v "$(pwd)":/output \
             returntocorp/semgrep \
             semgrep --config=auto --sarif --output=/output/semgrep-results.sarif /src || true
 
+      - name: Install converters for HTML->PDF and XML->HTML
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wkhtmltopdf xsltproc pandoc || true
+          # sarif-to-html already installed via npm above
+
+      - name: Convert SAST SARIF -> HTML -> PDF
+        run: |
+          set -e
+          # Snyk SARIF -> HTML -> PDF
+          if [ -f snyk-code-analysis.sarif ]; then
+            echo "Converting snyk-code-analysis.sarif -> snyk-report.html"
+            sarif-to-html snyk-code-analysis.sarif -o snyk-report.html || echo "sarif-to-html failed for snyk"
+            if [ -f snyk-report.html ]; then
+              echo "Converting snyk-report.html -> snyk-report.pdf"
+              wkhtmltopdf snyk-report.html snyk-report.pdf || echo "wkhtmltopdf failed for snyk-report.html"
+            fi
+          else
+            echo "No snyk-code-analysis.sarif found"
+          fi
+
+          # Semgrep SARIF -> HTML -> PDF
+          if [ -f semgrep-results.sarif ]; then
+            echo "Converting semgrep-results.sarif -> semgrep-report.html"
+            sarif-to-html semgrep-results.sarif -o semgrep-report.html || echo "sarif-to-html failed for semgrep"
+            if [ -f semgrep-report.html ]; then
+              echo "Converting semgrep-report.html -> semgrep-report.pdf"
+              wkhtmltopdf semgrep-report.html semgrep-report.pdf || echo "wkhtmltopdf failed for semgrep-report.html"
+            fi
+          else
+            echo "No semgrep-results.sarif found"
+          fi
+
+          # If JSON-only results exist, convert JSON to basic HTML via pandoc (fallback)
+          if [ -f snyk-code-analysis.json ] && [ ! -f snyk-report.html ]; then
+            echo "Generating fallback snyk-report.html from JSON"
+            pandoc -f json -t html snyk-code-analysis.json -o snyk-report.html || true
+            [ -f snyk-report.html ] && wkhtmltopdf snyk-report.html snyk-report.pdf || true
+          fi
+          if [ -f semgrep-results.json ] && [ ! -f semgrep-report.html ]; then
+            echo "Generating fallback semgrep-report.html from JSON"
+            pandoc -f json -t html semgrep-results.json -o semgrep-report.html || true
+            [ -f semgrep-report.html ] && wkhtmltopdf semgrep-report.html semgrep-report.pdf || true
+          fi
+
       - name: List generated SAST files
         run: |
           echo "=== Archivos SAST generados ==="
-          ls -lh snyk-code-analysis.json snyk-code-analysis.sarif semgrep-results.json semgrep-results.sarif 2>/dev/null || true
+          ls -lh snyk-code-analysis.json snyk-code-analysis.sarif snyk-report.html snyk-report.pdf semgrep-results.json semgrep-results.sarif semgrep-report.html semgrep-report.pdf 2>/dev/null || true
 
-      - name: Upload SAST Results as artifacts
+      - name: Upload SAST Results (JSON, SARIF, HTML, PDF)
         uses: actions/upload-artifact@v4
         with:
           name: SAST-Results
           path: |
             snyk-code-analysis.json
             snyk-code-analysis.sarif
+            snyk-report.html
+            snyk-report.pdf
             semgrep-results.json
             semgrep-results.sarif
+            semgrep-report.html
+            semgrep-report.pdf
         if: always()
 
       - name: Upload Snyk SARIF to GitHub Code Scanning
@@ -161,11 +207,50 @@ jobs:
             zaproxy/zap-stable \
             zap-baseline.py -t http://98.80.216.157:3000 -x zap-output.xml || true
 
-      - name: Upload ZAP DAST results
+      - name: Convert ZAP XML -> HTML -> PDF
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y xsltproc wkhtmltopdf || true
+          cat > zap_to_html.xsl <<'XSL'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+            <xsl:output method="html" encoding="utf-8" />
+            <xsl:template match="/">
+              <html><head><meta charset="utf-8"/><title>ZAP Report</title>
+                <style>body{font-family: Arial,Helvetica,sans-serif;} .alert{border-bottom:1px solid #ddd;padding:8px;} .sev{font-weight:bold;color:#b53f3f;padding-left:6px;}</style>
+              </head><body>
+              <h1>ZAP Baseline Scan</h1>
+              <xsl:for-each select="//alertitem">
+                <div class="alert">
+                  <div><strong><xsl:value-of select="alert"/></strong>
+                    <span class="sev">(<xsl:value-of select="riskcode"/> - <xsl:value-of select="riskdesc"/>)</span>
+                  </div>
+                  <div><em>URI:</em> <xsl:value-of select="uri"/></div>
+                  <div><em>Param:</em> <xsl:value-of select="param"/></div>
+                  <div><em>Description:</em> <xsl:value-of select="desc"/></div>
+                </div>
+              </xsl:for-each>
+              </body></html>
+            </xsl:template>
+          </xsl>
+XSL
+          if [ -f zap-output.xml ]; then
+            xsltproc zap_to_html.xsl zap-output.xml > zap-report.html || echo "xsltproc failed"
+            if [ -f zap-report.html ]; then
+              wkhtmltopdf zap-report.html zap-report.pdf || echo "wkhtmltopdf failed for zap-report.html"
+            fi
+          else
+            echo "No zap-output.xml found"
+          fi
+
+      - name: Upload ZAP (XML, HTML, PDF)
         uses: actions/upload-artifact@v4
         with:
           name: ZAP-DAST
-          path: zap-output.xml
+          path: |
+            zap-output.xml
+            zap-report.html
+            zap-report.pdf
         if: always()
 
   commit_reports:
