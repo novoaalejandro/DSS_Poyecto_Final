@@ -76,31 +76,37 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      # Ensure Node is available to run the Snyk CLI
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
       - name: Run Snyk Code (Source Code Analysis)
-        uses: snyk/actions/node@master
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: CODE/ --json-file-output=snyk-code-analysis.json
+        run: |
+          # Ejecuta Snyk Code apuntando al directorio CODE.
+          # Salida JSON en snyk-code-analysis.json. No fallamos el job si no hay resultados.
+          snyk code test CODE --json-file-output=snyk-code-analysis.json || true
 
       - name: Run Semgrep
         run: |
+          # Ejecuta semgrep en el directorio CODE y escribe resultado JSON en semgrep-results.json
           docker run --rm \
             -v $(pwd)/CODE:/src \
             -v $(pwd):/output \
             returntocorp/semgrep \
-            semgrep scan /src \
-            --config=auto \
-            --json \
-            --output=/output/semgrep-results.json || true
+            semgrep --config=auto --json --output=/output/semgrep-results.json /src || true
         continue-on-error: true
 
       - name: List generated files
         run: |
           echo "=== Archivos SAST generados ==="
-          ls -lh *.json 2>/dev/null || echo "No se encontraron archivos"
+          ls -lh snyk-code-analysis.json semgrep-results.json 2>/dev/null || echo "No se encontraron archivos SAST (archivos pueden estar vacíos o no creados)"
 
       - name: Upload SAST Results
         uses: actions/upload-artifact@v4
@@ -125,7 +131,6 @@ jobs:
             -w /zap \
             zaproxy/zap-stable \
             zap-baseline.py -t http://98.80.216.157:3000 -x zap-output.xml || true
-          # If you prefer to only consider medium+ alerts as failures, add "-m 1" to the zap-baseline.py invocation.
 
       - uses: actions/upload-artifact@v4
         with:
@@ -162,4 +167,4 @@ jobs:
           git config --global user.name "GitHub Actions"
           git add SECURITY_REPORTS || true
           git commit -m "🛡️ Auto-update security reports" || echo "No changes to commit"
-          git push || echo "Push failed (possibly no permission)"
+          git push || echo "Push failed (posible permiso insuficiente)"
