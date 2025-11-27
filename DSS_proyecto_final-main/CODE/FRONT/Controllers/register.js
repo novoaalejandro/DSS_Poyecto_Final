@@ -80,7 +80,7 @@ document.addEventListener("DOMContentLoaded", function() {
     }
 
     function fetchData(data) {
-        fetch('http://localhost:3000/users/add', {
+        fetch('http://98.80.216.157:3000/users/add', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
